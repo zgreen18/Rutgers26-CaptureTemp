@@ -15,7 +15,7 @@ Tested against an Alvium G1-130 VSWIR, which reports two temperatures:
 Any Allied Vision camera that exposes the standard GenICam `DeviceTemperature`
 feature should work; the script discovers the available sensors at runtime.
 
-## Requirements
+## Requirements:
 
 - Python 3.10 or newer
 - Vimba X installed at `/home/labuser/workspace/upstream/vimbax-sdk` (provides
