@@ -69,16 +69,43 @@ Log to a CSV every 5 seconds until stopped:
 .venv/bin/python capture_temp.py --interval 5 --csv temps.csv
 ```
 
+### Cooling test
+
+`--cooling-test` records a named run for comparing mounts, heatsinks and fan
+settings — a reading every 30 seconds for 10 minutes, written to a file named
+after the test and echoed to the terminal as it goes:
+
+```bash
+.venv/bin/python capture_temp.py --cooling-test
+```
+
+```
+Name for this test (e.g. carbon_fiber): fan_heatsink_12v
+opened camera: DEV_000A471E3D7C (Allied Vision Alvium G1-130 VSWIR (DEV_000A471E3D7C))
+logging 21 readings to fan_heatsink_12v_20260806_151301.csv
+press Ctrl-C to stop early
+15:13:01     0s  Sensor 31.70 C  Mainboard 28.40 C
+15:13:31    30s  Sensor 32.20 C  Mainboard 28.90 C
+```
+
+Pass `--name` to skip the prompt (spaces in the name become underscores), and
+`--interval` / `--count` to change the cadence or length. Stopping early with
+Ctrl-C keeps everything written so far.
+
 ### Options
 
 | Flag | Meaning | Default |
 |------|---------|---------|
 | `--camera ID` | which camera to open | first camera found |
-| `--interval SECONDS` | time between samples | `1.0` |
-| `--count N` | number of samples to take | `0` (run until Ctrl-C) |
+| `--interval SECONDS` | time between samples | `1.0` (`30.0` with `--cooling-test`) |
+| `--count N` | number of samples to take | `0` (run until Ctrl-C), `21` with `--cooling-test` |
 | `--csv FILE` | append samples to this file instead of printing | off |
+| `--cooling-test` | log a named run to `<name>_<timestamp>.csv` | off |
+| `--name NAME` | test name for `--cooling-test` | ask for one |
 
 ### CSV format
+
+There are two layouts. `--csv` writes one row per sensor, keyed by timestamp:
 
 ```
 timestamp,sensor,celsius
@@ -86,10 +113,24 @@ timestamp,sensor,celsius
 2026-07-09T16:17:01.034538+00:00,Mainboard,42.50
 ```
 
-Timestamps are UTC (ISO-8601). Each sample writes one row per sensor. The
-header is only written when the file is new or empty, so re-running with the
-same `--csv` file appends to the existing log. The file is flushed after every
-sample, so you can watch a long run live with `tail -f temps.csv`.
+Timestamps are UTC (ISO-8601). The header is only written when the file is new
+or empty, so re-running with the same `--csv` file appends to the existing log.
+This is the layout `temp_to_serial.py` reads.
+
+`--cooling-test` writes one row per sample instead, with a column per sensor
+and the time since the run started, which is easier to plot and to compare
+between runs:
+
+```
+time,seconds_elapsed,Sensor,Mainboard
+15:13:01,0,31.70,28.40
+15:13:31,30,32.20,28.90
+```
+
+Times here are local, and each run gets its own file, so nothing is appended.
+
+Both are flushed after every sample, so you can watch a long run live with
+`tail -f`.
 
 Status messages (which camera was opened, interrupts) go to stderr, so stdout
 stays clean for piping.
