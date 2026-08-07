@@ -1,11 +1,22 @@
 # capture_temp
 
-Two small tools:
+Camera-side tools, built on one rule: **only one process opens the camera at
+a time** (VmbPy gives it out exclusively). Whichever script below is running
+owns the camera; everything else works from the CSV it writes.
 
-- `capture_temp.py` — polls an Allied Vision camera's built-in temperature
-  sensors and prints the readings to the terminal or logs them to a CSV file.
-- `temp_to_serial.py` — follows that CSV and forwards each new reading to an
-  Arduino over USB serial, so a sketch can react to the camera temperature.
+- `camlib.py` — the shared library. `open_camera()` handles discovery and
+  lifecycle; `read_temperatures()`, `capture_image()`, `save_image()` and
+  friends take the already-open handle. New scripts should import from here
+  instead of talking to VmbPy directly.
+- `capture_temp.py` — polls the camera's built-in temperature sensors and
+  prints the readings to the terminal or logs them to a CSV file.
+- `grab_image.py` — grabs a single frame and saves it as a 16-bit TIFF.
+- `monitor.py` — the combined logger: owns the camera for a whole run and
+  records temperatures *and* frames together, one folder per run.
+- `temp_to_serial.py` — never touches the camera. It follows a CSV that
+  `capture_temp.py` or `monitor.py` is writing and forwards each new reading
+  to an Arduino over USB serial, so a sketch can react to the camera
+  temperature while a run is logging.
 
 Tested against an Alvium G1-130 VSWIR, which reports two temperatures:
 
@@ -30,14 +41,13 @@ feature should work; the script discovers the available sensors at runtime.
 ## Setup
 
 One-time setup — create a virtual environment in this directory and install
-VmbPy from the local wheel:
+the dependencies (VmbPy comes from the local SDK wheel; the pinned path is in
+`requirements.txt`):
 
 ```bash
 cd /home/labuser/workspace/projects/fan-cooling/capture_temperature
 python3 -m venv .venv
-source .venv/bin/activate
-pip install /home/labuser/workspace/upstream/vimbax-sdk/api/python/vmbpy-1.2.2-py3-none-manylinux_2_27_x86_64.whl
-pip install pyserial   # only needed for temp_to_serial.py
+.venv/bin/pip install -r requirements.txt
 ```
 
 After that, either activate the venv each session (`source .venv/bin/activate`)
@@ -135,11 +145,68 @@ Both are flushed after every sample, so you can watch a long run live with
 Status messages (which camera was opened, interrupts) go to stderr, so stdout
 stays clean for piping.
 
+## Grabbing an image
+
+`grab_image.py` opens the camera, takes one shot, saves it as a 16-bit TIFF
+(Mono12 data in the low 12 bits, so values run 0–4095), and prints the saved
+path to stdout:
+
+```bash
+.venv/bin/python grab_image.py                       # image_<timestamp>.tif
+.venv/bin/python grab_image.py --out frame.tif --exposure-us 160000 --gain-db 10
+```
+
+`--exposure-us` / `--gain-db` switch the matching auto mode off and fix the
+value; without them the camera keeps whatever it was doing (usually
+auto-exposure — pass `--warmup N` to let it settle across N discarded frames
+first). Don't run this while `monitor.py` or `capture_temp.py` has the
+camera open.
+
+## Logging temperatures and images together
+
+`monitor.py` is the single owner for a whole run: every interval it reads all
+temperature sensors and (optionally) grabs a frame, keeping the times, image
+filenames, and temperatures together in one folder:
+
+```bash
+.venv/bin/python monitor.py --name heatsink_v2 --interval 5 --frame-every 6
+```
+
+```
+runs/heatsink_v2_20260806_164608/
+├── data.csv
+└── frames/
+    ├── frame_0000.tif
+    └── frame_0001.tif
+```
+
+`data.csv` has one row per sample; the `filename` column is empty on samples
+where no frame was taken:
+
+```
+timestamp,seconds_elapsed,filename,Sensor,Mainboard
+2026-08-06T20:46:24.716534+00:00,0.000,frames/frame_0000.tif,45.30,41.20
+2026-08-06T20:46:29.716675+00:00,5.000,,45.30,41.20
+```
+
+Defaults mirror `--cooling-test` (a sample every 30 s, 21 samples); `--count 0`
+runs until Ctrl-C, and stopping early keeps everything written so far.
+`--frame-every K` grabs a frame on every Kth sample (`0` = temperatures only)
+— frames are ~2.6 MB each, so sampling temperature every 5 s with
+`--frame-every 6` keeps the fan feed fresh while writing a frame only every
+30 s. `--exposure-us`, `--gain-db`, and `--warmup` work as in `grab_image.py`.
+
+`--live-csv FILE` additionally appends every reading to the rolling
+`timestamp,sensor,celsius` CSV that `temp_to_serial.py` follows — that is how
+the fan keeps running while a run logs. From `fan_test/`, `make feed-monitor`
+launches the pair (`scripts/feed_monitor.sh`), just like `make feed` does for
+the temperature-only feed.
+
 ## Feeding the temperature to an Arduino
 
 `temp_to_serial.py` never talks to the camera — it just follows the CSV that
-`capture_temp.py` is writing, so the two run side by side and either one can
-be restarted without disturbing the other.
+`capture_temp.py` (or `monitor.py --live-csv`) is writing, so the two run
+side by side and either one can be restarted without disturbing the other.
 
 Terminal 1 — log temperatures:
 
@@ -203,10 +270,19 @@ Two things to keep in mind on the Arduino side:
 - **Startup takes a few seconds** — camera discovery (especially over GigE)
   runs before the first sample appears. A Ctrl-C during this window is held
   briefly and honored right after startup finishes.
-- **One reader per camera:** reading all sensors works by switching the
-  camera's `DeviceTemperatureSelector` back and forth, so don't run two
-  instances of this script (or another feature-touching tool) against the same
-  camera at the same time.
+- **One owner per camera:** VmbPy hands the camera out exclusively, so only
+  one of `capture_temp.py` / `grab_image.py` / `monitor.py` can run at a
+  time. A second script fails cleanly while the first one runs — with
+  `--camera ID` it reports `could not open camera '...' (in use by another
+  process?)`; without it, discovery skips the busy camera and times out with
+  `no camera with a DeviceTemperature feature found`. When you need
+  temperatures and images at once, that's `monitor.py`'s job, and anything
+  that only needs temperature numbers (like `temp_to_serial.py`) should read
+  the CSV instead of the camera. Within the owning process the same rule
+  applies in miniature: reading all sensors switches
+  `DeviceTemperatureSelector` back and forth, so temperature reads and frame
+  grabs happen strictly one after another (camlib's docstrings spell this
+  out).
 
 ## Troubleshooting
 
@@ -222,6 +298,9 @@ Two things to keep in mind on the Arduino side:
   to see the IDs of connected cameras.
 - **`error: camera '...' has no DeviceTemperature feature`** — this camera
   model doesn't report temperature; nothing the script can do about it.
+- **`error: could not open camera '...' (in use by another process?)`** —
+  another script already owns the camera (see "One owner per camera" above).
+  Stop it, or use its CSV output instead.
 - **Permission denied opening `/dev/ttyACM0`** — your user needs to be in the
   `dialout` group: `sudo usermod -aG dialout $USER`, then log out and back in.
 - **Arduino on a different port** — unplug it, run `ls /dev/ttyACM* /dev/ttyUSB*`,

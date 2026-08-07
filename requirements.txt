@@ -1,0 +1,11 @@
+# Python 3.12 — recreate the venv with:
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+#
+# vmbpy is Allied Vision's VmbC binding. It is not on PyPI — it ships as a
+# wheel inside the VimbaX SDK checkout, so the path below must exist to
+# reinstall. At runtime GENICAM_GENTL64_PATH must point at the same SDK's
+# cti/ directory (see README).
+vmbpy @ file:///home/labuser/workspace/upstream/vimbax-sdk/api/python/vmbpy-1.2.2-py3-none-manylinux_2_27_x86_64.whl#sha256=baf6ca3882c20822de623f7d8d8d7d2df5d95795d479d64a04c0c06941c31a34
+pyserial==3.5
+numpy
+tifffile
